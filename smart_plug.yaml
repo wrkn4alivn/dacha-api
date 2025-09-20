@@ -1,0 +1,174 @@
+substitutions:
+  friendly_name: "Internet Uplink"
+  # Timing parameters (in minutes) - TEST VALUES
+  cycle_time_min: "7"          # How often to turn on AND max on time when flag is true
+  min_on_time_min: "3"         # Minimum on time when flag is false
+  startup_delay_min: "2"       # Wait time before checking flag
+  # Calculated delays (do the math manually)
+  long_delay_min: "5"          # cycle_time_min - startup_delay_min (7-2=5)
+  short_delay_min: "1"         # min_on_time_min - startup_delay_min (3-2=1)
+  # GitHub API endpoint
+  github_api_url: "https://api.github.com/repos/wrkn4alivn/dacha-api/contents/flag.json"
+  
+esphome:
+  name: smart-plug-02
+
+esp8266:
+  board: esp01_1m
+
+globals:
+  - id: last_trigger_time
+    type: uint32_t
+    initial_value: '0'
+  - id: keep_on_flag
+    type: bool
+    initial_value: 'false'
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${friendly_name}"
+    password: !secret fallback_password
+
+http_request:
+  verify_ssl: False
+  timeout: 30s
+  useragent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  follow_redirects: true
+
+captive_portal:
+
+# Enable logging
+logger:
+  baud_rate: 0
+
+web_server:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "${friendly_name} Button Press"
+    on_press:
+      - switch.toggle: relay
+  
+  - platform: status
+    name: "${friendly_name} Status"
+
+switch:
+  - platform: gpio
+    name: "${friendly_name}"
+    pin: GPIO14
+    id: relay
+    on_turn_on:
+      - output.turn_on: blue_led
+    on_turn_off:
+      - output.turn_off: blue_led
+
+status_led:
+  pin:
+    number: GPIO12
+    inverted: true
+
+output:
+  - platform: gpio
+    pin: GPIO13
+    inverted: true
+    id: blue_led
+
+sensor:
+  - platform: wifi_signal
+    name: "${friendly_name} WiFi signal"
+    update_interval: 300s
+
+  - platform: uptime
+    name: "${friendly_name} uptime"
+    id: device_uptime
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    device_class: "duration"
+    update_interval: 1min
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: |-
+                uint32_t current_time = (uint32_t)id(device_uptime).state;
+                uint32_t elapsed = current_time - id(last_trigger_time);
+                // Handle rollover case
+                if (current_time < id(last_trigger_time)) {
+                  elapsed = current_time + (UINT32_MAX - id(last_trigger_time));
+                }
+                return elapsed >= ${cycle_time_min} * 60;
+            then:
+              - lambda: 'id(last_trigger_time) = (uint32_t)id(device_uptime).state;'
+              - script.execute: timer_routine
+
+script:
+  - id: timer_routine
+    mode: restart
+    then:
+      - switch.turn_on: relay
+      - delay: ${startup_delay_min}min
+      - http_request.get:
+          url: "${github_api_url}"
+          capture_response: true
+          request_headers:
+            Authorization: !secret github_token
+            Accept: "application/vnd.github.v3+json"
+            User-Agent: "ESPHome-DachaAPI/1.0"
+          on_response:
+            - lambda: |-
+                ESP_LOGI("main", "GitHub API Response - Status: %d, Duration: %u ms", response->status_code, response->duration_ms);
+                if (response->status_code == 200) {
+                  ESP_LOGI("main", "Received GitHub response: %s", body.c_str());
+                  
+                  // GitHub API returns base64-encoded content, but we can search the JSON directly
+                  // Look for "value":true in the base64 decoded content or in the response
+                  if (body.find("\"value\": true") != std::string::npos || 
+                      body.find("\"value\":true") != std::string::npos ||
+                      body.find("XCJ2YWx1ZVwiOiB0cnVl") != std::string::npos) {  // base64 for "value": true
+                    id(keep_on_flag) = true;
+                    ESP_LOGI("main", "GitHub flag set to TRUE");
+                  } else {
+                    id(keep_on_flag) = false;
+                    ESP_LOGI("main", "GitHub flag set to FALSE");
+                  }
+                } else {
+                  // Default behavior: assume short cycle on HTTP error
+                  id(keep_on_flag) = false;
+                  ESP_LOGW("main", "GitHub API failed with status code: %d - defaulting to short cycle", response->status_code);
+                }
+          on_error:
+            - lambda: |-
+                // Default behavior: assume short cycle on network error
+                id(keep_on_flag) = false;
+                ESP_LOGW("main", "GitHub API failed - network error - defaulting to short cycle");
+      - if:
+          condition:
+            lambda: 'return id(keep_on_flag);'
+          then:
+            - delay: ${long_delay_min}min
+            - http_request.get:
+                url: !secret turnoff_webhook_url
+            - switch.turn_off: relay
+          else:
+            - delay: ${short_delay_min}min
+            - switch.turn_off: relay
+
+text_sensor:
+  - platform: version
+    name: "${friendly_name} ESPHome version"
