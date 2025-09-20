@@ -136,16 +136,46 @@ script:
                 if (response->status_code == 200) {
                   ESP_LOGI("main", "Received GitHub response: %s", body.c_str());
                   
-                  // GitHub API returns base64-encoded content, but we can search the JSON directly
-                  // Look for "value":true in the base64 decoded content or in the response
-                  if (body.find("\"value\": true") != std::string::npos || 
-                      body.find("\"value\":true") != std::string::npos ||
-                      body.find("XCJ2YWx1ZVwiOiB0cnVl") != std::string::npos) {  // base64 for "value": true
-                    id(keep_on_flag) = true;
-                    ESP_LOGI("main", "GitHub flag set to TRUE");
+                  // This code assumes that the HTTP response body is a JSON object.
+                  // The `content` field of this JSON object contains the base64-encoded file content.
+                  // The code decodes the base64 string to a JSON string and parses the JSON.
+                  // Finally, it checks the value of the `value` key.
+                  if (body.length() > 0) {
+                      // Parse the JSON response
+                      auto json = json::parse(body);
+                  
+                      if (json.is_object()) {
+                          if (json.contains("content")) {
+                              // Get the base64 encoded content
+                              std::string base64_content = json["content"].get<std::string>();
+                              // Remove any newline characters that might be present in the base64 string
+                              base64_content.erase(std::remove(base64_content.begin(), base64_content.end(), '\n'), base64_content.end());
+                              // Decode the base64 string
+                              std::string decoded_content = base64::decode(base64_content);
+                  
+                              // Parse the decoded content as JSON
+                              auto content_json = json::parse(decoded_content);
+                  
+                              if (content_json.is_object() && content_json.contains("value")) {
+                                  bool value_flag = content_json["value"].get<bool>();
+                                  if (value_flag) {
+                                      id(keep_on_flag) = true;
+                                      ESP_LOGI("main", "GitHub flag set to TRUE");
+                                  } else {
+                                      id(keep_on_flag) = false;
+                                      ESP_LOGI("main", "GitHub flag set to FALSE");
+                                  }
+                              } else {
+                                  ESP_LOGE("main", "Error: Decoded content is not a valid JSON object or does not contain 'value' key.");
+                              }
+                          } else {
+                              ESP_LOGE("main", "Error: 'content' key not found in the GitHub API response.");
+                          }
+                      } else {
+                          ESP_LOGE("main", "Error: Invalid JSON response from GitHub API.");
+                      }
                   } else {
-                    id(keep_on_flag) = false;
-                    ESP_LOGI("main", "GitHub flag set to FALSE");
+                      ESP_LOGE("main", "Error: Empty response body from GitHub API.");
                   }
                 } else {
                   // Default behavior: assume short cycle on HTTP error
