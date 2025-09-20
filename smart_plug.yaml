@@ -1,12 +1,12 @@
 substitutions:
   friendly_name: "Internet Uplink"
   # Timing parameters (in minutes) - TEST VALUES
-  cycle_time_min: "7"          # How often to turn on AND max on time when flag is true
-  min_on_time_min: "3"         # Minimum on time when flag is false
-  startup_delay_min: "2"       # Wait time before checking flag
+  cycle_time_min: "120"          # How often to turn on AND max on time when flag is true
+  min_on_time_min: "15"         # Minimum on time when flag is false
+  startup_delay_min: "4"       # Wait time before checking flag
   # Calculated delays (do the math manually)
-  long_delay_min: "5"          # cycle_time_min - startup_delay_min (7-2=5)
-  short_delay_min: "1"         # min_on_time_min - startup_delay_min (3-2=1)
+  long_delay_min: "116"          # cycle_time_min - startup_delay_min (7-2=5)
+  short_delay_min: "11"         # min_on_time_min - startup_delay_min (3-2=1)
   # GitHub API endpoint
   github_api_url: "https://api.github.com/repos/wrkn4alivn/dacha-api/contents/flag.json"
   
