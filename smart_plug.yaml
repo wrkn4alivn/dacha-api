@@ -133,52 +133,61 @@ script:
           on_response:
             - lambda: |-
                 ESP_LOGI("main", "GitHub API Response - Status: %d, Duration: %u ms", response->status_code, response->duration_ms);
+          
+                // Check for a successful HTTP status code (200 OK)
                 if (response->status_code == 200) {
-                  ESP_LOGI("main", "Received GitHub response: %s", body.c_str());
-                  
-                  // This code assumes that the HTTP response body is a JSON object.
-                  // The `content` field of this JSON object contains the base64-encoded file content.
-                  // The code decodes the base64 string to a JSON string and parses the JSON.
-                  // Finally, it checks the value of the `value` key.
+                  // Check if the response body is empty before attempting to parse.
                   if (body.length() > 0) {
-                      // Parse the JSON response
-                      auto json = json::parse(body);
-                  
-                      if (json.is_object()) {
-                          if (json.contains("content")) {
-                              // Get the base64 encoded content
-                              std::string base64_content = json["content"].get<std::string>();
-                              // Remove any newline characters that might be present in the base64 string
-                              base64_content.erase(std::remove(base64_content.begin(), base64_content.end(), '\n'), base64_content.end());
-                              // Decode the base64 string
-                              std::string decoded_content = base64::decode(base64_content);
-                  
-                              // Parse the decoded content as JSON
-                              auto content_json = json::parse(decoded_content);
-                  
-                              if (content_json.is_object() && content_json.contains("value")) {
-                                  bool value_flag = content_json["value"].get<bool>();
-                                  if (value_flag) {
-                                      id(keep_on_flag) = true;
-                                      ESP_LOGI("main", "GitHub flag set to TRUE");
-                                  } else {
-                                      id(keep_on_flag) = false;
-                                      ESP_LOGI("main", "GitHub flag set to FALSE");
-                                  }
-                              } else {
-                                  ESP_LOGE("main", "Error: Decoded content is not a valid JSON object or does not contain 'value' key.");
-                              }
-                          } else {
-                              ESP_LOGE("main", "Error: 'content' key not found in the GitHub API response.");
-                          }
-                      } else {
-                          ESP_LOGE("main", "Error: Invalid JSON response from GitHub API.");
+                    ESP_LOGI("main", "Received GitHub response: %s", body.c_str());
+          
+                    // We first parse the full response body.
+                    JsonDocument root;
+                    DeserializationError error = deserializeJson(root, body);
+          
+                    if (error) {
+                      ESP_LOGE("main", "Failed to parse GitHub API JSON response: %s", error.c_str());
+                      return;
+                    }
+          
+                    // Use is<std::string>() to check if 'content' exists and is a string.
+                    if (root["content"].is<std::string>()) {
+                      std::string base64_content = root["content"].as<std::string>();
+                      
+                      // Use the correct base64_decode function that returns a vector of bytes.
+                      std::vector<uint8_t> decoded_bytes = esphome::base64_decode(base64_content);
+                      std::string decoded_content(decoded_bytes.begin(), decoded_bytes.end());
+                      
+                      // Now parse the decoded content as JSON.
+                      JsonDocument file_content_doc;
+                      DeserializationError file_error = deserializeJson(file_content_doc, decoded_content);
+                      
+                      if (file_error) {
+                        ESP_LOGE("main", "Failed to parse decoded file content JSON: %s", file_error.c_str());
+                        return;
                       }
+                      
+                      // Use is<bool>() to check if 'value' exists and is a boolean.
+                      if (file_content_doc["value"].is<bool>()) {
+                        bool value_flag = file_content_doc["value"].as<bool>();
+                        if (value_flag) {
+                          id(keep_on_flag) = true;
+                          ESP_LOGI("main", "GitHub flag set to TRUE");
+                        } else {
+                          id(keep_on_flag) = false;
+                          ESP_LOGI("main", "GitHub flag set to FALSE");
+                        }
+                      } else {
+                        ESP_LOGE("main", "Decoded content does not contain a boolean 'value' key.");
+                      }
+                    } else {
+                      ESP_LOGE("main", "GitHub API response does not contain 'content' key or its value is not a string.");
+                    }
                   } else {
-                      ESP_LOGE("main", "Error: Empty response body from GitHub API.");
+                    ESP_LOGE("main", "Error: Empty response body from GitHub API.");
+                    id(keep_on_flag) = false;
                   }
                 } else {
-                  // Default behavior: assume short cycle on HTTP error
+                  // Handle non-200 status codes. Default to a safe state.
                   id(keep_on_flag) = false;
                   ESP_LOGW("main", "GitHub API failed with status code: %d - defaulting to short cycle", response->status_code);
                 }
