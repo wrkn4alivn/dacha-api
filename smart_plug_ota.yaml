@@ -1,0 +1,256 @@
+substitutions:
+  friendly_name: "Internet Uplink"
+  # Timing parameters (in minutes) - TEST VALUES
+  cycle_time_min: "7"          # How often to turn on AND max on time when flag is true
+  min_on_time_min: "3"         # Minimum on time when flag is false
+  startup_delay_min: "2"       # Wait time before checking flag
+  # Calculated delays (do the math manually)
+  long_delay_min: "5"          # cycle_time_min - startup_delay_min (7-2=5)
+  short_delay_min: "1"         # min_on_time_min - startup_delay_min (3-2=1)
+  # Raw GitHub URLs (no authentication needed)
+  flag_json_url: "https://raw.githubusercontent.com/wrkn4alivn/dacha-api/main/flag.json"
+  ota_json_url: "https://raw.githubusercontent.com/wrkn4alivn/dacha-api/main/ota.json"
+  
+esphome:
+  name: smart-plug-02
+  on_boot:
+    priority: 600  # High priority - run early, only needs GPIO
+    then:
+      - script.execute: timer_routine
+
+esp8266:
+  board: esp01_1m
+
+globals:
+  - id: last_trigger_time
+    type: uint32_t
+    initial_value: '0'
+  - id: keep_on_flag
+    type: bool
+    initial_value: 'false'
+  - id: ota_bin_url
+    type: std::string
+    initial_value: '""'
+  - id: ota_md5_url
+    type: std::string
+    initial_value: '""'
+  - id: ota_flash_needed
+    type: bool
+    initial_value: 'false'
+
+wifi:
+  ssid: !secret dacha_ssid
+  password: !secret dacha_password
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${friendly_name}"
+    password: !secret fallback_password
+
+http_request:
+  verify_ssl: False
+  timeout: 30s
+  useragent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  follow_redirects: true
+
+captive_portal:
+
+# Enable logging
+logger:
+  baud_rate: 0
+
+web_server:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "${friendly_name} Button Press"
+    on_press:
+      - switch.toggle: relay
+  
+  - platform: status
+    name: "${friendly_name} Status"
+
+switch:
+  - platform: gpio
+    name: "${friendly_name}"
+    pin: GPIO14
+    id: relay
+    on_turn_on:
+      - output.turn_on: blue_led
+    on_turn_off:
+      - output.turn_off: blue_led
+
+status_led:
+  pin:
+    number: GPIO12
+    inverted: true
+
+output:
+  - platform: gpio
+    pin: GPIO13
+    inverted: true
+    id: blue_led
+
+sensor:
+  - platform: wifi_signal
+    name: "${friendly_name} WiFi signal"
+    update_interval: 300s
+
+  - platform: uptime
+    name: "${friendly_name} uptime"
+    id: device_uptime
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    device_class: "duration"
+    update_interval: 1min
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: |-
+                uint32_t current_time = (uint32_t)id(device_uptime).state;
+                uint32_t elapsed = current_time - id(last_trigger_time);
+                // Handle rollover case
+                if (current_time < id(last_trigger_time)) {
+                  elapsed = current_time + (UINT32_MAX - id(last_trigger_time));
+                }
+                return elapsed >= ${cycle_time_min} * 60;
+            then:
+              - lambda: 'id(last_trigger_time) = (uint32_t)id(device_uptime).state;'
+              - script.execute: timer_routine
+
+script:
+  - id: timer_routine
+    mode: queued
+    then:
+      - switch.turn_on: relay
+      - delay: ${startup_delay_min}min
+      # Check flag.json
+      - http_request.get:
+          url: "${flag_json_url}"
+          capture_response: true
+          on_response:
+            - lambda: |-
+                ESP_LOGI("main", "Flag JSON Response - Status: %d, Duration: %u ms", response->status_code, response->duration_ms);
+                
+                if (response->status_code == 200) {
+                  ESP_LOGI("main", "Received flag JSON: %s", body.c_str());
+                  
+                  JsonDocument flag_doc;
+                  DeserializationError error = deserializeJson(flag_doc, body);
+                  
+                  if (error) {
+                    ESP_LOGE("main", "Failed to parse flag JSON: %s", error.c_str());
+                    id(keep_on_flag) = false;
+                    return;
+                  }
+                  
+                  if (flag_doc["value"].is<bool>()) {
+                    bool value_flag = flag_doc["value"].as<bool>();
+                    id(keep_on_flag) = value_flag;
+                    ESP_LOGI("main", "Keep on flag set to %s", value_flag ? "TRUE" : "FALSE");
+                  } else {
+                    ESP_LOGE("main", "Flag JSON does not contain boolean 'value' key");
+                    id(keep_on_flag) = false;
+                  }
+                } else {
+                  ESP_LOGW("main", "Flag JSON request failed with status: %d - defaulting to short cycle", response->status_code);
+                  id(keep_on_flag) = false;
+                }
+          on_error:
+            - lambda: |-
+                ESP_LOGW("main", "Flag JSON request failed - network error - defaulting to short cycle");
+                id(keep_on_flag) = false;
+      # Check ota.json
+      - http_request.get:
+          url: "${ota_json_url}"
+          capture_response: true
+          on_response:
+            - lambda: |-
+                ESP_LOGI("main", "OTA JSON Response - Status: %d, Duration: %u ms", response->status_code, response->duration_ms);
+                
+                if (response->status_code == 200) {
+                  ESP_LOGI("main", "Received OTA JSON: %s", body.c_str());
+                  
+                  JsonDocument ota_doc;
+                  DeserializationError error = deserializeJson(ota_doc, body);
+                  
+                  if (error) {
+                    ESP_LOGE("main", "Failed to parse OTA JSON: %s", error.c_str());
+                    id(ota_flash_needed) = false;
+                    return;
+                  }
+                  
+                  // Check if we need to flash
+                  if (ota_doc["bin"].is<std::string>() && 
+                      ota_doc["md5"].is<std::string>() && 
+                      ota_doc["attempted"].is<bool>() &&
+                      !ota_doc["attempted"].as<bool>()) {
+                    
+                    id(ota_bin_url) = ota_doc["bin"].as<std::string>();
+                    id(ota_md5_url) = ota_doc["md5"].as<std::string>();
+                    id(ota_flash_needed) = true;
+                    
+                    ESP_LOGI("main", "OTA update needed - bin: %s, md5: %s", id(ota_bin_url).c_str(), id(ota_md5_url).c_str());
+                  } else {
+                    ESP_LOGI("main", "No OTA update needed");
+                    id(ota_flash_needed) = false;
+                  }
+                } else {
+                  ESP_LOGW("main", "OTA JSON request failed with status: %d", response->status_code);
+                  id(ota_flash_needed) = false;
+                }
+          on_error:
+            - lambda: |-
+                ESP_LOGW("main", "OTA JSON request failed - network error");
+                id(ota_flash_needed) = false;
+      # Handle OTA flash if needed
+      - if:
+          condition:
+            template: "{{ ota_flash_needed }}"
+          then:
+            - http_request.get:
+                url: !secret flash_attempt_webhook_url
+                on_response:
+                  - if:
+                      condition:
+                        lambda: 'return response->status_code == 200;'
+                      then:
+                        - lambda: 'ESP_LOGI("main", "Webhook successful, proceeding with OTA flash");'
+                        - ota.http_request.flash:
+                            url: "{{ ota_bin_url }}"
+                            md5_url: "{{ ota_md5_url }}"
+                            username: !secret ota_http_username
+                            password: !secret ota_http_password
+                      else:
+                        - lambda: 'ESP_LOGW("main", "Webhook failed, skipping OTA flash");'
+                on_error:
+                  - lambda: 'ESP_LOGW("main", "Webhook failed - network error, skipping OTA flash");'
+      # Continue with normal cycle logic
+      - if:
+          condition:
+            template: "{{ keep_on_flag }}"
+          then:
+            - delay: ${long_delay_min}min
+            - http_request.get:
+                url: !secret turnoff_webhook_url
+          else:
+            - delay: ${short_delay_min}min
+            - switch.turn_off: relay
+
+text_sensor:
+  - platform: version
+    name: "${friendly_name} ESPHome version"
